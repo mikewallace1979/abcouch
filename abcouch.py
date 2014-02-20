@@ -18,9 +18,10 @@ doc_files = {
     'small': 'small_doc.json',
     'large': 'large_doc.json'
 }
-dburl ='http://127.0.0.1:5984/abcouch'
-timeout = 60
-filename = 'out.{0}.{1}.csv'
+timeout = 240
+max_n = 2000000
+filename = '{0}.{1}.{2}.{3}'
+dburl = ''
 
 def parse_arguments():
     global options
@@ -47,10 +48,12 @@ def parse_arguments():
     )
     parser.add_option(
         '-t',
-        dest='total_requests_per_client',
-        help='Total number of requests each client should make'
+        dest='test_runtime',
+        help='Total number of seconds for which the test should run'
     )
     (options, args) = parser.parse_args()
+    global dburl
+    dburl = args[0]
 
 def spawn_ab(args, url):
     full_args = ('ab',) + args + (url, )
@@ -68,10 +71,10 @@ def spawn_readers(base_args, run):
             number_of_clients
         ),
         '-n {0}'.format(
-            number_of_clients * int(options.total_requests_per_client)
+            max_n
         ),
         '-e{0}'.format(
-            filename.format('readers', run)
+            filename.format(options.doc_size, 'readers', run, 'csv')
         ),
     )
     return spawn_ab(base_args + ab_args, url)
@@ -83,14 +86,14 @@ def spawn_writers(base_args, run):
             number_of_clients
         ),
         '-n {0}'.format(
-            number_of_clients * int(options.total_requests_per_client)
+            max_n
         ),
         '-T application/json',
         '-p{0}'.format(
             doc_files.get(options.doc_size, 'small')
         ),
         '-e{0}'.format(
-            filename.format('writers', run)
+            filename.format(options.doc_size, 'writers', run, 'csv')
         )
     )
     return spawn_ab(base_args + ab_args, dburl)
@@ -115,39 +118,56 @@ def setup_db():
     )
     r.raise_for_status()
 
-def postprocess():
-    runs = range(int(options.number_of_tests))
+def postprocess(run):
     for client_type in ('readers','writers'):
-        filenames = ['out.{0}.{1}.csv'.format(
+        filename0 = filename.format(
+            options.doc_size,
             client_type,
-            run
-        ) for run in runs]
-        lines = [file(f, 'r').readlines() for f in filenames]
-        raw_pcts = [(r[51], r[91], r[96], r[100]) for r in lines]
-        pcts = [[float(raw_pct.split(',')[1]) for raw_pct in raw_pct_set] for raw_pct_set in raw_pcts]
-        transformed = [[pct[i] for pct in pcts] for i in range(len(pcts[0]))]
-        mean_pcts = [sum(pct) / len(pct) for pct in transformed]
-        print '{0}: p50={1}, p90={2}, p95={3}, p99={4}'.format(
+            run,
+            'csv'
+        )
+        lines = file(filename0, 'r').readlines()
+        raw_pcts = [lines[51], lines[91], lines[96], lines[100]]
+        pcts = [float(raw_pct.split(',')[1]) for raw_pct in raw_pcts]
+        print 'run {0}, {1}: p50={2}, p90={3}, p95={4}, p99={5}'.format(
+            run,
             client_type,
-            *mean_pcts
+            *pcts
         )
 
 def main():
     parse_arguments()
     base_args = (
-       '-t {0}'.format(
+        '-t {0}'.format(
+             options.test_runtime
+        ),
+       '-s {0}'.format(
             timeout
         ),
-        '-r'
+        '-r',
+        '-k'
     )
     for run in range(int(options.number_of_tests)):
-        print 'Starting run {0}'.format(run)
         setup_db()
         readers_pid = spawn_readers(base_args, run)
         writers_pid = spawn_writers(base_args, run)
         readers_pid.wait()
+        with file(filename.format(
+            options.doc_size,
+            'readers',
+            run,
+            'ab'
+        ), 'w') as about:
+            about.write(readers_pid.communicate()[0])
         writers_pid.wait()
-    postprocess()
+        with file(filename.format(
+            options.doc_size,
+            'writers',
+            run,
+            'ab'
+        ), 'w') as about:
+            about.write(writers_pid.communicate()[0])
+        postprocess(run)
 
 
 if __name__ == '__main__':
